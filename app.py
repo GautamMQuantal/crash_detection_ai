@@ -9,12 +9,11 @@ import os
 from io import BytesIO
 import time
 
-# Set your OpenAI API key securely
 openai.api_key = os.getenv("OPENAI_API_KEY")
+
 st.title("🚗 Crash Detection from Video")
 video_file = st.file_uploader("Upload a video file", type=["mp4", "avi", "mov"])
 
-# Helper: frame to base64
 def encode_frame_to_base64(frame):
     img = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
     buffered = BytesIO()
@@ -22,19 +21,20 @@ def encode_frame_to_base64(frame):
     return base64.b64encode(buffered.getvalue()).decode("utf-8")
 
 if video_file:
-    # Save uploaded file temporarily
-    tfile = tempfile.NamedTemporaryFile(delete=False)
+    tfile = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
     tfile.write(video_file.read())
+    input_path = tfile.name
 
-    cap = cv2.VideoCapture(tfile.name)
+    cap = cv2.VideoCapture(input_path)
     fps = cap.get(cv2.CAP_PROP_FPS)
-    frame_interval = 30  # Check 1 per second if ~30 fps
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    frame_interval = 30  # every 1 sec for ~30 fps
 
     detected_accident_frames = set()
     frame_count = 0
     st.info("⏳ Analyzing video...")
 
-    # Phase 1: Analyze every nth frame
     while cap.isOpened():
         ret, frame = cap.read()
         if not ret:
@@ -44,7 +44,7 @@ if video_file:
             base64_img = encode_frame_to_base64(frame)
 
             try:
-                response = openai.chat.completions.create(
+                response = openai.ChatCompletion.create(
                     model="gpt-4o",
                     messages=[
                         {
@@ -70,19 +70,20 @@ if video_file:
 
     cap.release()
 
-    # Phase 2: Replay full video and overlay detection
-    st.success("✅ Analysis complete. Replaying video with labels...")
+    # Write a new video with accident overlays
+    st.success("✅ Analysis complete. Rendering output video...")
 
-    cap = cv2.VideoCapture(tfile.name)
+    cap = cv2.VideoCapture(input_path)
+    output_path = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4").name
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
+
     frame_count = 0
-    stframe = st.empty()
-
     while cap.isOpened():
         ret, frame = cap.read()
         if not ret:
             break
 
-        # If accident detected earlier near this frame, overlay label
         for acc_frame in detected_accident_frames:
             if frame_count >= acc_frame and frame_count <= acc_frame + frame_interval:
                 timestamp = str(timedelta(seconds=int(frame_count / fps)))
@@ -90,9 +91,12 @@ if video_file:
                             cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
                 break
 
-        stframe.image(frame, channels="BGR")
-        time.sleep(1 / fps)
+        out.write(frame)
         frame_count += 1
 
     cap.release()
+    out.release()
+
+    # Display the final video
+    st.video(output_path)
     st.success("🎞️ Video playback complete.")
