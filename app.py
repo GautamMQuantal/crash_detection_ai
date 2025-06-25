@@ -11,45 +11,38 @@ import time
 
 openai.api_key = os.getenv("OPENAI_API_KEY")
 
-# Streamlit UI
 st.title("🚗 Crash Detection from Video")
 video_file = st.file_uploader("Upload a video file", type=["mp4", "avi", "mov"])
 
-
-# Helper to convert frame to base64
+# Helper: frame to base64
 def encode_frame_to_base64(frame):
     img = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
     buffered = BytesIO()
     img.save(buffered, format="JPEG")
     return base64.b64encode(buffered.getvalue()).decode("utf-8")
 
-# Process video if uploaded
 if video_file:
-    # Save to temp file
+    # Save uploaded file temporarily
     tfile = tempfile.NamedTemporaryFile(delete=False)
     tfile.write(video_file.read())
 
     cap = cv2.VideoCapture(tfile.name)
     fps = cap.get(cv2.CAP_PROP_FPS)
-    frame_interval = 30  # check every 30 frames (~1 second if fps ~30)
+    frame_interval = 30  # Check 1 per second if ~30 fps
 
-    accident_frames = []
-
+    detected_accident_frames = set()
+    frame_count = 0
     st.info("⏳ Analyzing video...")
 
-    frame_count = 0
-    stframe = st.empty()
-
+    # Phase 1: Analyze every nth frame
     while cap.isOpened():
         ret, frame = cap.read()
         if not ret:
             break
 
         if frame_count % frame_interval == 0:
-            # Prepare image for GPT
             base64_img = encode_frame_to_base64(frame)
 
-            # Query GPT-4o
             try:
                 response = openai.chat.completions.create(
                     model="gpt-4o",
@@ -66,15 +59,8 @@ if video_file:
                 )
 
                 reply = response.choices[0].message.content.strip().lower()
-                timestamp = str(timedelta(seconds=int(frame_count / fps)))
-
                 if "yes" in reply:
-                    accident_frames.append((frame.copy(), timestamp))
-
-                    # Annotate and show in Streamlit
-                    cv2.putText(frame, f"Accident Detected", (30, 50),
-                                cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 255), 3)
-                    stframe.image(frame, channels="BGR", caption=f"Accident at {timestamp}")
+                    detected_accident_frames.add(frame_count)
 
             except Exception as e:
                 st.error(f"OpenAI API error: {e}")
@@ -84,12 +70,29 @@ if video_file:
 
     cap.release()
 
-    # Summary
-    st.success("✅ Video analysis complete.")
+    # Phase 2: Replay full video and overlay detection
+    st.success("✅ Analysis complete. Replaying video with labels...")
 
-    if accident_frames:
-        st.subheader("🕒 Accident Timestamps:")
-        for _, ts in accident_frames:
-            st.write(f"🔴 Accident at: {ts}")
-    else:
-        st.write("✅ No accidents detected in the video.")
+    cap = cv2.VideoCapture(tfile.name)
+    frame_count = 0
+    stframe = st.empty()
+
+    while cap.isOpened():
+        ret, frame = cap.read()
+        if not ret:
+            break
+
+        # If accident detected earlier near this frame, overlay label
+        for acc_frame in detected_accident_frames:
+            if frame_count >= acc_frame and frame_count <= acc_frame + frame_interval:
+                timestamp = str(timedelta(seconds=int(frame_count / fps)))
+                cv2.putText(frame, f"Accident Detected", (30, 50),
+                            cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+                break
+
+        stframe.image(frame, channels="BGR")
+        time.sleep(1 / fps)
+        frame_count += 1
+
+    cap.release()
+    st.success("🎞️ Video playback complete.")
