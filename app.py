@@ -11,7 +11,6 @@ import time
 
 # Set your OpenAI API key securely
 openai.api_key = os.getenv("OPENAI_API_KEY")
-
 st.title("🚗 Crash Detection from Video")
 video_file = st.file_uploader("Upload a video file", type=["mp4", "avi", "mov"])
 
