@@ -53,6 +53,7 @@ if video_file:
                         max_tokens=10
                     )
 
+                    # Corrected way to access the response
                     reply = response['choices'][0]['message']['content'].strip().lower()
                     if "yes" in reply:
                         detected_accident_frames.add(frame_count)
@@ -65,12 +66,15 @@ if video_file:
 
         cap.release()
 
-        # Phase 2: Replay full video and overlay detection
+        # Phase 2: Replay full video with overlay detection and save to an output file
         st.success("✅ Analysis complete. Replaying video with labels...")
+
+        output_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # For .mp4 file
+        out = cv2.VideoWriter(output_file.name, fourcc, fps, (int(cap.get(3)), int(cap.get(4))))
 
         cap = cv2.VideoCapture(tfile.name)
         frame_count = 0
-        stframe = st.empty()
 
         while cap.isOpened():
             ret, frame = cap.read()
@@ -85,9 +89,12 @@ if video_file:
                                 cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
                     break
 
-            stframe.image(frame, channels="BGR")
-            time.sleep(1 / fps)
+            out.write(frame)  # Write frame to output video file
             frame_count += 1
 
         cap.release()
+        out.release()
+
+        # Display the output video using Streamlit
         st.success("🎞️ Video playback complete.")
+        st.video(output_file.name)
