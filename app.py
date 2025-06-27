@@ -22,79 +22,81 @@ def encode_frame_to_base64(frame):
     return base64.b64encode(buffered.getvalue()).decode("utf-8")
 
 if video_file:
-    with st.spinner("⏳ Analyzing video..."):
-        # Save uploaded file temporarily
-        tfile = tempfile.NamedTemporaryFile(delete=False)
-        tfile.write(video_file.read())
+    # Save uploaded file temporarily
+    tfile = tempfile.NamedTemporaryFile(delete=False)
+    tfile.write(video_file.read())
 
-        cap = cv2.VideoCapture(tfile.name)
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        frame_interval = 30  # Check 1 per second if ~30 fps
+    cap = cv2.VideoCapture(tfile.name)
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    frame_interval = 30  # Check 1 per second if ~30 fps
 
-        detected_accident_frames = set()
-        frame_count = 0
+    detected_accident_frames = set()
+    frame_count = 0
+    st.info("⏳ Analyzing video...")
 
-        # Phase 1: Analyze every nth frame
-        while cap.isOpened():
-            ret, frame = cap.read()
-            if not ret:
+    # Phase 1: Analyze every nth frame
+    while cap.isOpened():
+        ret, frame = cap.read()
+        if not ret:
+            break
+
+        if frame_count % frame_interval == 0:
+            base64_img = encode_frame_to_base64(frame)
+
+            try:
+                response = openai.chat.completions.create(
+                    model="gpt-4o",
+                    messages=[{
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "Does this image show a car accident? Just answer Yes or No."},
+                            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_img}"}}
+                        ]
+                    }],
+                    max_tokens=10
+                )
+
+                reply = response.choices[0].message.content.strip().lower()
+                if "yes" in reply:
+                    detected_accident_frames.add(frame_count)
+
+            except Exception as e:
+                st.error(f"OpenAI API error: {e}")
                 break
 
-            if frame_count % frame_interval == 0:
-                base64_img = encode_frame_to_base64(frame)
+        frame_count += 1
 
-                try:
-                    response = openai.chat.completions.create(
-                        model="gpt-4o",
-                        messages=[{
-                            "role": "user",
-                            "content": "Does this image show a car accident? Just answer Yes or No."
-                        }],
-                        max_tokens=10
-                    )
+    cap.release()
 
-                    # Corrected way to access the response
-                    reply = response['choices'][0]['message']['content'].strip().lower()
-                    if "yes" in reply:
-                        detected_accident_frames.add(frame_count)
+    # Phase 2: Create a new video with overlay and save it
+    st.success("✅ Analysis complete. Creating video with labels...")
 
-                except Exception as e:
-                    st.error(f"OpenAI API error: {e}")
-                    break
+    cap = cv2.VideoCapture(tfile.name)
+    output_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    out = cv2.VideoWriter(output_file.name, fourcc, fps, (int(cap.get(3)), int(cap.get(4))))
 
-            frame_count += 1
+    frame_count = 0
+    while cap.isOpened():
+        ret, frame = cap.read()
+        if not ret:
+            break
 
-        cap.release()
-
-        # Phase 2: Replay full video with overlay detection and save to an output file
-        st.success("✅ Analysis complete. Replaying video with labels...")
-
-        output_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # For .mp4 file
-        out = cv2.VideoWriter(output_file.name, fourcc, fps, (int(cap.get(3)), int(cap.get(4))))
-
-        cap = cv2.VideoCapture(tfile.name)
-        frame_count = 0
-
-        while cap.isOpened():
-            ret, frame = cap.read()
-            if not ret:
+        # If accident detected earlier near this frame, overlay label
+        for acc_frame in detected_accident_frames:
+            if frame_count >= acc_frame and frame_count <= acc_frame + frame_interval:
+                timestamp = str(timedelta(seconds=int(frame_count / fps)))
+                cv2.putText(frame, f"Accident Detected", (30, 50),
+                            cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
                 break
 
-            # If accident detected earlier near this frame, overlay label
-            for acc_frame in detected_accident_frames:
-                if frame_count >= acc_frame and frame_count <= acc_frame + frame_interval:
-                    timestamp = str(timedelta(seconds=int(frame_count / fps)))
-                    cv2.putText(frame, f"Accident Detected", (30, 50),
-                                cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
-                    break
+        # Write the frame to the output video
+        out.write(frame)
+        frame_count += 1
 
-            out.write(frame)  # Write frame to output video file
-            frame_count += 1
+    cap.release()
+    out.release()
 
-        cap.release()
-        out.release()
-
-        # Display the output video using Streamlit
-        st.success("🎞️ Video playback complete.")
-        st.video(output_file.name)
+    # Phase 3: Display the newly created video
+    st.success("🎞️ Video playback complete.")
+    st.video(output_file.name) 
