@@ -95,4 +95,4 @@ if video_file:
         frame_count += 1
 
     cap.release()
-    st.success("🎞️ Video playback complete.")
+    st.success("🎞️ Video playback complete.")  
