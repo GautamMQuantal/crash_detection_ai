@@ -3,3 +3,4 @@ openai
 opencv-python
 Pillow
 python-dotenv
+opencv-python-headless
