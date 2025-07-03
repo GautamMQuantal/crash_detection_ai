@@ -21,19 +21,11 @@ openai.api_key = st.secrets["OPENAI_API_KEY"]
 st.title("🚗 Crash Detection from Video")
 st.write("Upload a video file to analyze for car accidents using AI")
 
-# Configuration options
-col1, col2 = st.columns(2)
-with col1:
-    frame_interval = st.slider("Frame Analysis Interval", 15, 90, 45, 
-                              help="Analyze every N frames (higher = faster but less accurate)")
-with col2:
-    max_file_size = st.selectbox("Max File Size (MB)", [5, 10, 25, 50], index=1)
+# Fixed configuration
+frame_interval = 30  # Analyze every 30 frames (~1 sec if fps ≈ 30)
+max_file_size = 25   # Fixed at 25MB
 
-video_file = st.file_uploader(
-    "Upload a video file", 
-    type=["mp4", "avi", "mov"],
-    help=f"Maximum file size: {max_file_size}MB"
-)
+video_file = st.file_uploader("Upload a video file", type=["mp4", "avi", "mov"])
 
 # Helper to convert frame to base64
 def encode_frame_to_base64(frame):
@@ -131,10 +123,17 @@ if video_file:
         # Create UI elements
         progress_bar = st.progress(0)
         status_text = st.empty()
-        frame_display = st.empty()
+        video_display = st.empty()
         
-        # Process video
+        # Process video and create output with labels
         start_time = time.time()
+        
+        # Create output video writer
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        output_path = tempfile.mktemp(suffix='.mp4')
+        out = cv2.VideoWriter(output_path, fourcc, fps, 
+                             (int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), 
+                              int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))))
         
         while cap.isOpened():
             ret, frame = cap.read()
@@ -145,7 +144,9 @@ if video_file:
             progress = frame_count / total_frames
             progress_bar.progress(progress)
             
-            # Process frame at intervals
+            frame_to_write = frame.copy()
+            
+            # Process frame at intervals for accident detection
             if frame_count % frame_interval == 0:
                 processed_frames += 1
                 timestamp = str(timedelta(seconds=int(frame_count / fps)))
@@ -156,26 +157,38 @@ if video_file:
                 is_accident, response = analyze_frame_with_gpt(frame)
                 
                 if is_accident:
-                    # Store accident frame
+                    # Store accident info
                     accident_frames.append((frame.copy(), timestamp, frame_count))
                     
-                    # Add accident label to frame
-                    frame_with_label = frame.copy()
-                    cv2.putText(frame_with_label, "ACCIDENT DETECTED", (30, 50),
-                              cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 255), 3)
-                    cv2.putText(frame_with_label, timestamp, (30, 100),
-                              cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
-                    
-                    # Display accident frame
-                    frame_display.image(frame_with_label, channels="BGR", 
-                                      caption=f"🚨 ACCIDENT DETECTED at {timestamp}")
-                    
-                    st.warning(f"🚨 Accident detected at {timestamp}")
+                    # Add accident label to all frames for next few seconds (show label for 2-3 seconds)
+                    label_duration = int(fps * 2)  # Show label for 2 seconds
+                    for i in range(max(0, frame_count), min(total_frames, frame_count + label_duration)):
+                        if i not in [acc[2] for acc in accident_frames]:  # Avoid duplicate labeling
+                            accident_frames.append((None, timestamp, i))
                 
                 # Small delay to prevent API rate limiting
                 time.sleep(0.1)
-
+            
+            # Check if current frame should have accident label
+            current_accident = None
+            for acc_frame, acc_time, acc_frame_num in accident_frames:
+                if frame_count >= acc_frame_num and frame_count < acc_frame_num + int(fps * 2):
+                    current_accident = acc_time
+                    break
+            
+            # Add label if accident detected
+            if current_accident:
+                cv2.putText(frame_to_write, "ACCIDENT DETECTED", (30, 50),
+                          cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 255), 3)
+                cv2.putText(frame_to_write, f"Time: {current_accident}", (30, 100),
+                          cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+            
+            # Write frame to output video
+            out.write(frame_to_write)
             frame_count += 1
+        
+        # Release video writer
+        out.release()
 
         # Cleanup
         cap.release()
@@ -185,20 +198,35 @@ if video_file:
         progress_bar.progress(1.0)
         status_text.text(f"✅ Analysis complete! Processed {processed_frames} frames in {processing_time:.1f}s")
 
-        # Display results
-        if accident_frames:
-            st.success(f"🚨 Found {len(accident_frames)} accident(s) in the video")
+        # Display the processed video with accident labels
+        if os.path.exists(output_path):
+            st.subheader("📹 Processed Video (with accident detection labels)")
+            
+            # Read the output video file
+            with open(output_path, 'rb') as video_file:
+                video_bytes = video_file.read()
+            
+            # Display the video
+            st.video(video_bytes)
+            
+            # Clean up output file
+            try:
+                os.unlink(output_path)
+            except:
+                pass
+
+        # Display results summary
+        unique_accidents = []
+        for acc_frame, acc_time, acc_frame_num in accident_frames:
+            if acc_frame is not None:  # Only count actual detections, not label duration frames
+                unique_accidents.append((acc_frame, acc_time, acc_frame_num))
+        
+        if unique_accidents:
+            st.success(f"🚨 Found {len(unique_accidents)} accident(s) in the video")
             
             st.subheader("📋 Accident Summary:")
-            for i, (frame, timestamp, frame_num) in enumerate(accident_frames, 1):
-                with st.expander(f"Accident #{i} at {timestamp}"):
-                    col1, col2 = st.columns([2, 1])
-                    with col1:
-                        st.image(frame, channels="BGR", caption=f"Frame {frame_num}")
-                    with col2:
-                        st.write(f"⏰ **Time:** {timestamp}")
-                        st.write(f"🎬 **Frame:** {frame_num}")
-                        st.write(f"📊 **Confidence:** High")
+            for i, (frame, timestamp, frame_num) in enumerate(unique_accidents, 1):
+                st.write(f"🔴 **Accident #{i}:** {timestamp} (Frame {frame_num})")
         else:
             st.success("✅ No accidents detected in the video")
             st.balloons()
@@ -208,26 +236,13 @@ if video_file:
         st.exception(e)
     
     finally:
-        # Clean up temporary file
+        # Clean up temporary files
         try:
             if temp_file and os.path.exists(temp_file_path):
                 os.unlink(temp_file_path)
+            if 'output_path' in locals() and os.path.exists(output_path):
+                os.unlink(output_path)
         except:
             pass  # Ignore cleanup errors
-
-# Instructions
-with st.expander("ℹ️ How to use"):
-    st.markdown("""
-    1. **Set up API Key:** Add your OpenAI API key to Streamlit secrets
-    2. **Upload Video:** Choose a video file (MP4, AVI, or MOV)
-    3. **Adjust Settings:** Configure frame interval and file size limits
-    4. **Analyze:** The app will process your video and detect accidents
-    5. **Review Results:** Check the detected accidents and timestamps
-    
-    **Tips:**
-    - Higher frame intervals process faster but may miss brief accidents
-    - Smaller videos process faster and cost less API credits
-    - The app analyzes frames using GPT-4 Vision for accurate detection
-    """)
 
 st.markdown("---")
