@@ -125,15 +125,9 @@ if video_file:
         status_text = st.empty()
         video_display = st.empty()
         
-        # Process video and create output with labels
+        # Process video - store accident detection info
         start_time = time.time()
-        
-        # Create output video writer
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        output_path = tempfile.mktemp(suffix='.mp4')
-        out = cv2.VideoWriter(output_path, fourcc, fps, 
-                             (int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), 
-                              int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))))
+        accident_detection_map = {}  # frame_number -> timestamp
         
         while cap.isOpened():
             ret, frame = cap.read()
@@ -143,8 +137,6 @@ if video_file:
             # Update progress
             progress = frame_count / total_frames
             progress_bar.progress(progress)
-            
-            frame_to_write = frame.copy()
             
             # Process frame at intervals for accident detection
             if frame_count % frame_interval == 0:
@@ -157,38 +149,18 @@ if video_file:
                 is_accident, response = analyze_frame_with_gpt(frame)
                 
                 if is_accident:
-                    # Store accident info
+                    # Store accident frame info
                     accident_frames.append((frame.copy(), timestamp, frame_count))
                     
-                    # Add accident label to all frames for next few seconds (show label for 2-3 seconds)
-                    label_duration = int(fps * 2)  # Show label for 2 seconds
-                    for i in range(max(0, frame_count), min(total_frames, frame_count + label_duration)):
-                        if i not in [acc[2] for acc in accident_frames]:  # Avoid duplicate labeling
-                            accident_frames.append((None, timestamp, i))
+                    # Mark frames for labeling (2 seconds duration)
+                    label_duration = int(fps * 2)
+                    for i in range(frame_count, min(total_frames, frame_count + label_duration)):
+                        accident_detection_map[i] = timestamp
                 
                 # Small delay to prevent API rate limiting
                 time.sleep(0.1)
-            
-            # Check if current frame should have accident label
-            current_accident = None
-            for acc_frame, acc_time, acc_frame_num in accident_frames:
-                if frame_count >= acc_frame_num and frame_count < acc_frame_num + int(fps * 2):
-                    current_accident = acc_time
-                    break
-            
-            # Add label if accident detected
-            if current_accident:
-                cv2.putText(frame_to_write, "ACCIDENT DETECTED", (30, 50),
-                          cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 255), 3)
-                cv2.putText(frame_to_write, f"Time: {current_accident}", (30, 100),
-                          cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
-            
-            # Write frame to output video
-            out.write(frame_to_write)
+
             frame_count += 1
-        
-        # Release video writer
-        out.release()
 
         # Cleanup
         cap.release()
@@ -198,34 +170,76 @@ if video_file:
         progress_bar.progress(1.0)
         status_text.text(f"✅ Analysis complete! Processed {processed_frames} frames in {processing_time:.1f}s")
 
-        # Display the processed video with accident labels
-        if os.path.exists(output_path):
-            st.subheader("📹 Processed Video (with accident detection labels)")
+        # Now create and display the video with accident labels
+        if accident_frames:
+            st.subheader("📹 Video with Accident Detection")
             
-            # Read the output video file
-            with open(output_path, 'rb') as video_file:
-                video_bytes = video_file.read()
+            # Reset video capture to beginning
+            cap2 = cv2.VideoCapture(temp_file_path)
+            
+            # Create output video with FFmpeg-compatible settings
+            height = int(cap2.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            width = int(cap2.get(cv2.CAP_PROP_FRAME_WIDTH))
+            
+            # Use H.264 codec for better browser compatibility
+            fourcc = cv2.VideoWriter_fourcc(*'avc1')
+            output_path = tempfile.mktemp(suffix='.mp4')
+            out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
+            
+            if not out.isOpened():
+                # Fallback to mp4v if avc1 fails
+                fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+                out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
+            
+            frame_count = 0
+            progress_bar2 = st.progress(0)
+            status_text2 = st.empty()
+            
+            while cap2.isOpened():
+                ret, frame = cap2.read()
+                if not ret:
+                    break
+                
+                progress = frame_count / total_frames
+                progress_bar2.progress(progress)
+                status_text2.text(f"🎬 Creating output video... Frame {frame_count}/{total_frames}")
+                
+                # Add accident label if this frame should have one
+                if frame_count in accident_detection_map:
+                    timestamp = accident_detection_map[frame_count]
+                    cv2.putText(frame, "ACCIDENT DETECTED", (30, 50),
+                              cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 255), 3)
+                    cv2.putText(frame, f"Time: {timestamp}", (30, 100),
+                              cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+                
+                out.write(frame)
+                frame_count += 1
+            
+            cap2.release()
+            out.release()
             
             # Display the video
-            st.video(video_bytes)
-            
-            # Clean up output file
             try:
-                os.unlink(output_path)
-            except:
-                pass
+                with open(output_path, 'rb') as video_file:
+                    video_bytes = video_file.read()
+                
+                st.video(video_bytes)
+                status_text2.text("✅ Video ready!")
+                
+            except Exception as e:
+                st.error(f"Error displaying video: {str(e)}")
+                st.info("Showing original video instead:")
+                st.video(video_file.getvalue())
+        else:
+            st.info("No accidents detected. Showing original video:")
+            st.video(video_file.getvalue())
 
         # Display results summary
-        unique_accidents = []
-        for acc_frame, acc_time, acc_frame_num in accident_frames:
-            if acc_frame is not None:  # Only count actual detections, not label duration frames
-                unique_accidents.append((acc_frame, acc_time, acc_frame_num))
-        
-        if unique_accidents:
-            st.success(f"🚨 Found {len(unique_accidents)} accident(s) in the video")
+        if accident_frames:
+            st.success(f"🚨 Found {len(accident_frames)} accident(s) in the video")
             
             st.subheader("📋 Accident Summary:")
-            for i, (frame, timestamp, frame_num) in enumerate(unique_accidents, 1):
+            for i, (frame, timestamp, frame_num) in enumerate(accident_frames, 1):
                 st.write(f"🔴 **Accident #{i}:** {timestamp} (Frame {frame_num})")
         else:
             st.success("✅ No accidents detected in the video")
@@ -245,4 +259,3 @@ if video_file:
         except:
             pass  # Ignore cleanup errors
 
-st.markdown("---")
